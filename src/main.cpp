@@ -22,7 +22,11 @@
 #include <Adafruit_TinyUSB.h>
 #include <MIDI.h>
 #include <math.h>
+#include <Adafruit_NeoPixel.h>
 #include "samples_pico.h"
+
+// Onboard NeoPixel LED on GP16
+Adafruit_NeoPixel pixel(1, 16, NEO_GRB + NEO_KHZ800);
 
 // ==================== USB MIDI ====================
 Adafruit_USBD_MIDI usb_midi;
@@ -42,9 +46,11 @@ static const uint8_t PIN_WR   = 8;  // GP8 -> Genesis Pin 7 -> reg bit 6
 
 static const int dT = 20;
 
-// ==================== ULN2003A GPIO Helpers ====================
+// ==================== GPIO Helpers ====================
+// Direct connection (no ULN2003A) - uncomment the inverted line if using ULN
 inline void setGenesisPin(uint8_t pin, bool value) {
-  digitalWrite(pin, value ? LOW : HIGH);  // invert for ULN2003A
+  digitalWrite(pin, value ? HIGH : LOW);  // direct connection
+  // digitalWrite(pin, value ? LOW : HIGH);  // use this line for ULN2003A
 }
 inline void outputNibble(uint8_t n) {
   setGenesisPin(PIN_BIT0, (n >> 0) & 1);
@@ -63,9 +69,11 @@ inline void strobeWR() {
 // ==================== Variables ====================
 int bendAmount = 2;
 byte page_number = 0;
-byte velocity;
+byte velocity; // Global last-played velocity - matches original GenMDM behavior
 byte ccvalue2;
 byte bendLSB, bendMSB;
+byte voiceAge[6] = { 0,0,0,0,0,0 };
+byte voiceAgeCounter = 0;
 
 // Sample playback
 int SPB_flag = 0, SPB_sound = 0, SPB_counter = 0, SPB_speed = 0;
@@ -86,7 +94,7 @@ byte pitchTracking[6];
 // Pitch Values
 byte octDiv = 12;
 byte pitchOffset = 64;
-int pitchInt;
+uint16_t pitchInt;
 double pitchDouble;
 double constantDouble = 6.711;
 byte reg22 = 0;
@@ -251,14 +259,25 @@ void doNote(byte channel, byte pitch, byte velocity) {
   else if (channel <= 5) {
     if (velocity > 0) {
       if (polyFlag == 1) {
+        int found = -1;
         for (int i = 0; i < 6; i++) {
-          if (polyBusy[i] == 0) { channel = i; polyBusy[i] = 1; i = 6; }
+          if (polyBusy[i] == 0) { found = i; break; }
         }
+        if (found < 0) {
+          byte oldest = 255;
+          for (int i = 0; i < 6; i++) {
+            if (voiceAge[i] < oldest) { oldest = voiceAge[i]; found = i; }
+          }
+          writeMD(0, 0x28, ((found / 3 << 2) | (found % 3)));
+        }
+        channel = found;
+        polyBusy[channel] = 1;
+        voiceAge[channel] = ++voiceAgeCounter;
       }
       pitch = pitch - 64 + pitchOffset;
       pitchTracking[channel] = pitch;
       pitchDouble = pow(2, ((pitch % octDiv) + (0.015625 * bendAmount * (bend[channel] - 64)) + constantDouble) / octDiv) * 440;
-      pitchInt = (int)pitchDouble;
+      pitchInt = (uint16_t)pitchDouble;
       pitchInt = ((pitch / octDiv) << 11) | pitchInt;
       writeMD(channel / 3, 0xa4 + (channel % 3), pitchInt >> 8);
       writeMD(channel / 3, 0xa0 + (channel % 3), pitchInt % 256);
@@ -378,14 +397,30 @@ void doCC(byte channel, byte ccnumber, byte ccvalue) {
     case 78: writeMD(0, 0x2B, ccvalue << 1); sample_on = ccvalue >> 6; break;
     case 81: bendAmount = ccvalue / 18; break;
     case 83: constantDouble = (ccvalue > 63) ? 6.41 : 6.711; break;
-    case 84: octDiv = ccvalue + 1; break;
+    case 84: octDiv = constrain(ccvalue + 1, 1, 24); break;
     case 85: pitchOffset = ccvalue; break;
     case 86: SPB_speed = ccvalue; save_speed = SPB_speed; break;
     case 87: polyFlag = ccvalue >> 6; break;
     case 88: overSamp = (ccvalue >> 3) + 1; break;
     case 89: tri_flag = (ccvalue >> 6) + 1; break;
+
+    // SSG-EG (CC 90-93) - YM2612 registers 0x90-0x9C
+    case 90: writeMD(channel/3, 0x90 + (channel%3), ccvalue >> 3); break;
+    case 91: writeMD(channel/3, 0x94 + (channel%3), ccvalue >> 3); break;
+    case 92: writeMD(channel/3, 0x98 + (channel%3), ccvalue >> 3); break;
+    case 93: writeMD(channel/3, 0x9C + (channel%3), ccvalue >> 3); break;
+    case 120: // All Sound Off
+    case 123: // All Notes Off
+      for (int i = 0; i < 6; i++) {
+        writeMD(0, 0x28, ((i / 3 << 2) | (i % 3)));
+        polyBusy[i] = 0;
+      }
+      for (int i = 0; i < 4; i++) { writeAmplitude(0, i); velocityData[i] = 0; }
+      SPB_flag = 0;
+      break;
+
     case 9: {
-      byte idx = ccvalue / 8;
+      byte idx = min((byte)(ccvalue / 8), (byte)15);
       doCC(channel+1,14,ALGO[idx]); doCC(channel+1,15,FB[idx]);
       doCC(channel+1,16,TLOP1[idx]); doCC(channel+1,17,TLOP2[idx]);
       doCC(channel+1,18,TLOP3[idx]); doCC(channel+1,19,TLOP4[idx]);
@@ -427,7 +462,7 @@ void doBend(byte channel, int bend_usb) {
   if (channel <= 5) {
     bend[channel] = bendMSB;
     pitchDouble = pow(2, ((pitchTracking[channel] % octDiv) + (0.015625 * bendAmount * (bend[channel] - 64)) + constantDouble) / octDiv) * 440;
-    pitchInt = (int)pitchDouble;
+    pitchInt = (uint16_t)pitchDouble;
     pitchInt = ((pitchTracking[channel] / octDiv) << 11) | pitchInt;
     writeMD(channel / 3, 0xa4 + (channel % 3), pitchInt >> 8);
     writeMD(channel / 3, 0xa0 + (channel % 3), pitchInt % 256);
@@ -464,15 +499,40 @@ void doSample() {
 }
 
 // ==================== MIDI Callbacks ====================
+void doProgramChange(byte channel, byte program) {
+  doCC(channel, 9, program);
+}
+
+// Non-blocking LED flash - flash purple for note on, turn off when elapsed
+volatile unsigned long ledFlashUntil = 0;
+inline void flashLED() {
+  pixel.setPixelColor(0, pixel.Color(30, 0, 40)); // purple (dim)
+  pixel.show();
+  ledFlashUntil = millis() + 50; // 50ms flash
+}
+
 void handleNoteOn(byte ch, byte note, byte vel) {
-  if (vel == 0) doNoteOff(ch, note, 0); else doNote(ch, note, vel);
+  if (vel == 0) { doNoteOff(ch, note, 0); }
+  else { flashLED(); doNote(ch, note, vel); }
 }
 void handleNoteOff(byte ch, byte note, byte vel) { doNoteOff(ch, note, vel); }
 void handleCC(byte ch, byte num, byte val) { doCC(ch, num, val); }
 void handlePitchBend(byte ch, int val) { doBend(ch, val); }
+void handleProgramChange(byte ch, byte pgm) { doProgramChange(ch, pgm); }
 
 // ==================== Setup ====================
 void setup() {
+  // Debug LED (NeoPixel on GP16)
+  pixel.begin();
+  pixel.setPixelColor(0, pixel.Color(0, 0, 50));  // dim blue
+  pixel.show(); delay(300);
+  pixel.setPixelColor(0, 0);
+  pixel.show(); delay(200);
+  pixel.setPixelColor(0, pixel.Color(0, 50, 0));  // dim green
+  pixel.show(); delay(300);
+  pixel.setPixelColor(0, 0);
+  pixel.show();
+
   pinMode(PIN_BIT0, OUTPUT); pinMode(PIN_BIT1, OUTPUT);
   pinMode(PIN_BIT2, OUTPUT); pinMode(PIN_BIT3, OUTPUT);
   pinMode(PIN_NB, OUTPUT); pinMode(PIN_AD, OUTPUT); pinMode(PIN_WR, OUTPUT);
@@ -486,6 +546,7 @@ void setup() {
   usbMIDI.setHandleNoteOff(handleNoteOff);
   usbMIDI.setHandleControlChange(handleCC);
   usbMIDI.setHandlePitchBend(handlePitchBend);
+  usbMIDI.setHandleProgramChange(handleProgramChange);
 
   // Serial MIDI (TRS input on GP1/Serial1 RX via 6N137)
   Serial1.setRX(1);
@@ -494,24 +555,27 @@ void setup() {
   serialMIDI.setHandleNoteOff(handleNoteOff);
   serialMIDI.setHandleControlChange(handleCC);
   serialMIDI.setHandlePitchBend(handlePitchBend);
+  serialMIDI.setHandleProgramChange(handleProgramChange);
 
   delay(550); // Wait for cart ROM YM2612 init
 
+  // Match original v1.02 firmware setup (verified against hex disassembly)
   doCC(1,77,127); delay(1); doCC(2,77,127); delay(1);
   doCC(3,77,127); delay(1); doCC(4,77,127); delay(1);
   doCC(5,77,127); delay(1); doCC(6,77,127); delay(1);
-  doCC(1,9,40); delay(1); doCC(2,9,20); delay(1);
-  doCC(3,9,10); delay(1); doCC(4,9,20); delay(1);
-  doCC(5,9,60); delay(1); doCC(6,9,20); delay(1);
+  // Original loads preset 1 (bass) on all 6 channels via CC 9 = 8
+  doCC(1,9,8); delay(1); doCC(2,9,8); delay(1);
+  doCC(3,9,8); delay(1); doCC(4,9,8); delay(1);
+  doCC(5,9,8); delay(1); doCC(6,9,8); delay(1);
 
-  // Startup melody
+  // Startup melody (ascending arpeggio)
   delay(100);
-  doNote(1,60,50); delay(120); doNote(1,60,0); delay(30);
-  doNote(2,64,50); delay(120); doNote(2,64,0); delay(30);
-  doNote(3,67,50); delay(120); doNote(3,67,0); delay(30);
-  doNote(4,72,50); delay(120); doNote(4,72,0); delay(30);
-  doNote(5,76,45); delay(120); doNote(5,76,0); delay(30);
-  doNote(6,79,40); delay(300); doNote(6,79,0);
+  doNote(1,60,120); delay(120); doNote(1,60,0); delay(30);
+  doNote(2,64,120); delay(120); doNote(2,64,0); delay(30);
+  doNote(3,67,120); delay(120); doNote(3,67,0); delay(30);
+  doNote(4,72,120); delay(120); doNote(4,72,0); delay(30);
+  doNote(5,76,115); delay(120); doNote(5,76,0); delay(30);
+  doNote(6,79,110); delay(300); doNote(6,79,0);
 
   randomSeed(rp2040.hwrand32());
 }
@@ -521,4 +585,11 @@ void loop() {
   doSample();
   serialMIDI.read();
   usbMIDI.read();
+
+  // Turn off LED after flash duration
+  if (ledFlashUntil != 0 && millis() > ledFlashUntil) {
+    pixel.setPixelColor(0, 0);
+    pixel.show();
+    ledFlashUntil = 0;
+  }
 }
