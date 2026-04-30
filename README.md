@@ -27,7 +27,7 @@ For wiring/build instructions, see [WIRING.md](WIRING.md).
 These reduce dropped MIDI bytes when the device is under sustained heavy load (multi-channel notes + CC automation), especially via the 3.5mm TRS input.
 
 - **Enlarged Serial1 RX FIFO (256 bytes).** The original RP2040 default UART buffer can overflow during a 4-5 ms preset load (CC 9 / Program Change) at full MIDI rate. 256 bytes absorbs the worst-case burst with margin to spare.
-- **Last-value write cache for non-freq YM2612 registers.** Repeated identical CC writes (e.g., LFO sweeps, mod wheel, slow TL automation) are deduplicated so the cart bus isn't bit-banged for nothing — saves ~180 µs per skipped write. The cache deliberately bypasses the FM frequency registers (0xA0–0xAF), key-on/off (0x28), and DAC stream (0x2A/2B). See "YM2612 quirks" below for why.
+- **Last-value write cache for non-freq YM2612 registers.** Repeated identical CC writes (e.g., LFO sweeps, mod wheel, slow TL automation) are deduplicated so the cart bus isn't bit-banged for nothing, saves ~180 µs per skipped write. The cache deliberately bypasses the FM frequency registers (0xA0–0xAF), key-on/off (0x28), and DAC stream (0x2A/2B). See "YM2612 quirks" below for why.
 - **Pitch-bend coalescing.** A storm of bend messages on a channel collapses to its most recent value, applied once per main-loop pass. Eliminates the multi-millisecond pile-up that used to happen during fast bend automation.
 
 ## YM2612 quirks worth knowing if you fork this
