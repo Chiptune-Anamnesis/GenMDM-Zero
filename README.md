@@ -1,6 +1,6 @@
 # GenMDM Pico
 
-A port of [GenMDM v1.02](https://catskullelectronics.com/genmdm) to the Raspberry Pi Pico / RP2040, with a few small fixes and quality-of-life improvements over the original AVR firmware.
+A port of [GenMDM v1.02]([https://catskullelectronics.com/genmdm](https://github.com/little-scale)) to the Raspberry Pi Pico / RP2040, with a few small fixes and quality-of-life improvements over the original AVR firmware.
 
 The original GenMDM converts MIDI into Sega Genesis YM2612 + SN76489 register writes via a Mega Drive controller-port cartridge. This port is bit-for-bit compatible with v1.02 for normal MIDI data, same CCs, same sound, but ships on cheaper, more available hardware and addresses a handful of issues in the original.
 
@@ -44,4 +44,4 @@ pio run -e rp2040zero
 
 PlatformIO + Earle Philhower's [arduino-pico](https://github.com/earlephilhower/arduino-pico) core, with Adafruit TinyUSB and FortySevenEffects MIDI Library. Targets the Waveshare RP2040-Zero by default; any RP2040 board works with minor pin remapping.
 
-Credit to little-scale for the original GenMDM firmware, hardware and ROM.
+Credit to [little-scale]([https://catskullelectronics.com/genmdm](https://github.com/little-scale)) for the original GenMDM firmware, hardware and ROM.
