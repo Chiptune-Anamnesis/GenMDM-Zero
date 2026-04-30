@@ -32,8 +32,8 @@ These reduce dropped MIDI bytes when the device is under sustained heavy load (m
 
 ## YM2612 quirks worth knowing if you fork this
 
-- **Shared frequency-high latch.** The YM2612 has *one* global latch for FM frequency-high writes (registers 0xA4–0xA6 and 0xAC–0xAE) — not one per channel. You must always write the high byte immediately before the low byte (0xA0–0xA2 / 0xA8–0xAA) for that channel, otherwise the next commit picks up another channel's latched block bits and the note plays in the wrong octave. This is why the write cache exempts the entire 0xA0–0xAF range.
-- **3-bit block field.** Block is bits 3–5 of register 0xA4 — values 0–7 only. Never write a value where bit 6 is set.
+- **Shared frequency-high latch.** The YM2612 has *one* global latch for FM frequency-high writes (registers 0xA4–0xA6 and 0xAC–0xAE) not one per channel. You must always write the high byte immediately before the low byte (0xA0–0xA2 / 0xA8–0xAA) for that channel, otherwise the next commit picks up another channel's latched block bits and the note plays in the wrong octave. This is why the write cache exempts the entire 0xA0–0xAF range.
+- **3-bit block field.** Block is bits 3–5 of register 0xA4 values 0–7 only. Never write a value where bit 6 is set.
 - **0x28, 0x2A, 0x2B are events, not state.** Same-value writes to key on/off and the DAC stream are semantically meaningful (re-trigger, sample byte) — never deduplicate them.
 
 ## Building
