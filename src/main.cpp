@@ -116,6 +116,25 @@ byte TL2[] = { 127,127,127,127,127,127 };
 byte TL3[] = { 127,127,127,127,127,127 };
 byte TL4[] = { 127,127,127,127,127,127 };
 
+// Velocity curve LUT - maps raw MIDI velocity (0-127) to perceptually-scaled value.
+// Uses sqrt curve: boosts low velocities for audibility while preserving max at 127.
+// Toggle via CC 82 (value 0 = original linear, value > 0 = curve enabled, default ON).
+byte velocityCurveEnabled = 1;
+const uint8_t velocityCurve[128] = {
+    0,  11,  16,  20,  23,  25,  28,  30,  32,  34,  36,  37,  39,  41,  42,  44,
+   45,  46,  48,  49,  50,  52,  53,  54,  55,  56,  57,  59,  60,  61,  62,  63,
+   64,  65,  66,  67,  68,  69,  69,  70,  71,  72,  73,  74,  75,  76,  76,  77,
+   78,  79,  80,  80,  81,  82,  83,  84,  84,  85,  86,  87,  87,  88,  89,  89,
+   90,  91,  92,  92,  93,  94,  94,  95,  96,  96,  97,  98,  98,  99, 100, 100,
+  101, 101, 102, 103, 103, 104, 105, 105, 106, 106, 107, 108, 108, 109, 109, 110,
+  110, 111, 112, 112, 113, 113, 114, 114, 115, 115, 116, 117, 117, 118, 118, 119,
+  119, 120, 120, 121, 121, 122, 122, 123, 123, 124, 124, 125, 125, 126, 126, 127
+};
+
+inline byte applyCurve(byte v) {
+  return velocityCurveEnabled ? velocityCurve[v & 0x7F] : v;
+}
+
 // FM Presets (16)
 const byte ALGO[16] =      { 37,62,127,127,35,0,96,112,0,16,32,48,64,80,96,112 };
 const byte FB[16] =        { 0,65,0,0,0,0,96,112,0,16,32,48,64,80,96,112 };
@@ -195,7 +214,25 @@ void writeAmplitude(byte velocity, byte channel);
 void writeFrequency(byte pitch, byte channel);
 
 // ==================== YM2612 Write Protocol ====================
+// Last-written value cache: skip duplicate register writes (~180us each).
+// Exempt:
+//   0x28           - key on/off events (same-value write means re-trigger)
+//   0x2A, 0x2B     - DAC sample byte stream
+//   0xA0-0xAF      - FM frequency registers. The high-byte writes (0xA4-0xA6,
+//                    0xAC-0xAE) share ONE global latch register on the YM2612;
+//                    skipping a "redundant" 0xA4 lets another channel's stale
+//                    latch corrupt the next 0xA0 commit, producing wrong-octave
+//                    notes when multiple channels are interleaving freq writes.
+uint8_t writeMDCache[2][256];
+bool writeMDCacheValid[2][256];
+
 void writeMD(byte page, byte address, byte data) {
+  bool exempt = (address == 0x28) || (address == 0x2A) || (address == 0x2B)
+             || (address >= 0xA0 && address <= 0xAF);
+  if (!exempt && writeMDCacheValid[page][address] && writeMDCache[page][address] == data) return;
+  writeMDCache[page][address] = data;
+  writeMDCacheValid[page][address] = true;
+
   if (page_number != page) {
     page_number = page;
     outputNibble(page == 0 ? 0x0D : 0x0E);
@@ -278,13 +315,17 @@ void doNote(byte channel, byte pitch, byte velocity) {
       pitchTracking[channel] = pitch;
       pitchDouble = pow(2, ((pitch % octDiv) + (0.015625 * bendAmount * (bend[channel] - 64)) + constantDouble) / octDiv) * 440;
       pitchInt = (uint16_t)pitchDouble;
-      pitchInt = ((pitch / octDiv) << 11) | pitchInt;
+      // YM2612 block field is 3 bits (0-7); saturate to avoid overflow
+      // into bit 6 of register 0xA4 (silent drop to block 0 on v1.02).
+      uint16_t blk = pitch / octDiv; if (blk > 7) blk = 7;
+      pitchInt = (blk << 11) | pitchInt;
       writeMD(channel / 3, 0xa4 + (channel % 3), pitchInt >> 8);
       writeMD(channel / 3, 0xa0 + (channel % 3), pitchInt % 256);
-      writeMD(channel / 3, 0x40 + (channel % 3), 127 - ((velocity * TL1[channel]) / 127));
-      writeMD(channel / 3, 0x44 + (channel % 3), 127 - ((velocity * TL2[channel]) / 127));
-      writeMD(channel / 3, 0x48 + (channel % 3), 127 - ((velocity * TL3[channel]) / 127));
-      writeMD(channel / 3, 0x4C + (channel % 3), 127 - ((velocity * TL4[channel]) / 127));
+      byte v = applyCurve(velocity);
+      writeMD(channel / 3, 0x40 + (channel % 3), 127 - ((v * TL1[channel] + 63) / 127));
+      writeMD(channel / 3, 0x44 + (channel % 3), 127 - ((v * TL2[channel] + 63) / 127));
+      writeMD(channel / 3, 0x48 + (channel % 3), 127 - ((v * TL3[channel] + 63) / 127));
+      writeMD(channel / 3, 0x4C + (channel % 3), 127 - ((v * TL4[channel] + 63) / 127));
       writeMD(0, 0x28, 0xf0 | ((channel / 3 << 2) | (channel % 3)));
     } else {
       if (polyFlag == 1) {
@@ -396,6 +437,7 @@ void doCC(byte channel, byte ccnumber, byte ccvalue) {
     case 77: regB4[channel]=(regB4[channel]|0xC0)&(((ccvalue>>5)<<6)|0x3F); writeMD(channel/3,0xB4+(channel%3),regB4[channel]); break;
     case 78: writeMD(0, 0x2B, ccvalue << 1); sample_on = ccvalue >> 6; break;
     case 81: bendAmount = ccvalue / 18; break;
+    case 82: velocityCurveEnabled = (ccvalue > 0) ? 1 : 0; break; // velocity curve on/off
     case 83: constantDouble = (ccvalue > 63) ? 6.41 : 6.711; break;
     case 84: octDiv = constrain(ccvalue + 1, 1, 24); break;
     case 85: pitchOffset = ccvalue; break;
@@ -463,7 +505,8 @@ void doBend(byte channel, int bend_usb) {
     bend[channel] = bendMSB;
     pitchDouble = pow(2, ((pitchTracking[channel] % octDiv) + (0.015625 * bendAmount * (bend[channel] - 64)) + constantDouble) / octDiv) * 440;
     pitchInt = (uint16_t)pitchDouble;
-    pitchInt = ((pitchTracking[channel] / octDiv) << 11) | pitchInt;
+    uint16_t blk = pitchTracking[channel] / octDiv; if (blk > 7) blk = 7;
+    pitchInt = (blk << 11) | pitchInt;
     writeMD(channel / 3, 0xa4 + (channel % 3), pitchInt >> 8);
     writeMD(channel / 3, 0xa0 + (channel % 3), pitchInt % 256);
   }
@@ -499,6 +542,11 @@ void doSample() {
 }
 
 // ==================== MIDI Callbacks ====================
+// Bend coalescing: a flood of bend messages on one channel collapses to
+// the most recent value, flushed once per main-loop iteration.
+volatile bool bendPending[6] = {false, false, false, false, false, false};
+volatile int  bendPendingValue[6];
+
 void doProgramChange(byte channel, byte program) {
   doCC(channel, 9, program);
 }
@@ -517,7 +565,11 @@ void handleNoteOn(byte ch, byte note, byte vel) {
 }
 void handleNoteOff(byte ch, byte note, byte vel) { doNoteOff(ch, note, vel); }
 void handleCC(byte ch, byte num, byte val) { doCC(ch, num, val); }
-void handlePitchBend(byte ch, int val) { doBend(ch, val); }
+void handlePitchBend(byte ch, int val) {
+  byte i = ch - 1;
+  if (i < 6) { bendPendingValue[i] = val; bendPending[i] = true; }
+  else doBend(ch, val);  // PSG channels: handle inline (cheap)
+}
 void handleProgramChange(byte ch, byte pgm) { doProgramChange(ch, pgm); }
 
 // ==================== Setup ====================
@@ -549,6 +601,7 @@ void setup() {
   usbMIDI.setHandleProgramChange(handleProgramChange);
 
   // Serial MIDI (TRS input on GP1/Serial1 RX via 6N137)
+  Serial1.setFIFOSize(256);
   Serial1.setRX(1);
   serialMIDI.begin(MIDI_CHANNEL_OMNI);
   serialMIDI.setHandleNoteOn(handleNoteOn);
@@ -585,6 +638,10 @@ void loop() {
   doSample();
   serialMIDI.read();
   usbMIDI.read();
+
+  for (byte i = 0; i < 6; i++) {
+    if (bendPending[i]) { bendPending[i] = false; doBend(i + 1, bendPendingValue[i]); }
+  }
 
   // Turn off LED after flash duration
   if (ledFlashUntil != 0 && millis() > ledFlashUntil) {

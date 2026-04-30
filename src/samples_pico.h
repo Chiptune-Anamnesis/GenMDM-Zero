@@ -412,17 +412,43 @@ const uint8_t sample6[] = {
   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
 };
 
-const int sample_length_list[] = {
-  584, 2127, 702, 581, 2687, 904, 112
-};
-#define NUM_SAMPLES 7
+// Bring in expanded sample bank (Bitkits drums + oneshots + DigiDrums)
+#include "samples_drums.h"
+#include "samples_oneshots.h"
+#include "samples_legacy.h"
 
-const uint8_t* const sample_ptrs[] = {
-  sample0,
-  sample1,
-  sample2,
-  sample3,
-  sample4,
-  sample5,
-  sample6,
+#define NUM_SAMPLES 71
+
+const int sample_length_list[NUM_SAMPLES] = {
+  // Original 7 samples from v1.02 hex (indices 0-6)
+  584, 2127, 702, 581, 2687, 904, 112,
+  // 24 Bitkits drums (indices 7-30)
+  drm00_len, drm01_len, drm02_len, drm03_len, drm04_len, drm05_len,
+  drm06_len, drm07_len, drm08_len, drm09_len, drm10_len, drm11_len,
+  drm12_len, drm13_len, drm14_len, drm15_len, drm16_len, drm17_len,
+  drm18_len, drm19_len, drm20_len, drm21_len, drm22_len, drm23_len,
+  // 24 Oneshots (indices 31-54)
+  os00_len, os01_len, os02_len, os03_len, os04_len, os05_len,
+  os06_len, os07_len, os08_len, os09_len, os10_len, os11_len,
+  os12_len, os13_len, os14_len, os15_len, os16_len, os17_len,
+  os18_len, os19_len, os20_len, os21_len, os22_len, os23_len,
+  // 16 DigiDrums (indices 55-70)
+  s00_len, s01_len, s02_len, s03_len, s04_len, s05_len, s06_len, s07_len,
+  s08_len, s09_len, s10_len, s11_len, s12_len, s13_len, s14_len, s15_len
+};
+
+const uint8_t* const sample_ptrs[NUM_SAMPLES] = {
+  // Original 7 samples (0-6)
+  sample0, sample1, sample2, sample3, sample4, sample5, sample6,
+  // Bitkits drums (7-30)
+  drm00, drm01, drm02, drm03, drm04, drm05, drm06, drm07,
+  drm08, drm09, drm10, drm11, drm12, drm13, drm14, drm15,
+  drm16, drm17, drm18, drm19, drm20, drm21, drm22, drm23,
+  // Oneshots (31-54)
+  os00, os01, os02, os03, os04, os05, os06, os07,
+  os08, os09, os10, os11, os12, os13, os14, os15,
+  os16, os17, os18, os19, os20, os21, os22, os23,
+  // DigiDrums (55-70)
+  s00, s01, s02, s03, s04, s05, s06, s07,
+  s08, s09, s10, s11, s12, s13, s14, s15
 };
