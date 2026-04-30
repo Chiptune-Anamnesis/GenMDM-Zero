@@ -2,7 +2,7 @@
 
 A port of [GenMDM v1.02](https://catskullelectronics.com/genmdm) to the Raspberry Pi Pico / RP2040, with a few small fixes and quality-of-life improvements over the original AVR firmware.
 
-The original GenMDM converts MIDI into Sega Genesis YM2612 + SN76489 register writes via a Mega Drive controller-port cartridge. This port is bit-for-bit compatible with v1.02 for normal MIDI data — same CCs, same sound — but ships on cheaper, more available hardware and addresses a handful of issues in the original.
+The original GenMDM converts MIDI into Sega Genesis YM2612 + SN76489 register writes via a Mega Drive controller-port cartridge. This port is bit-for-bit compatible with v1.02 for normal MIDI data, same CCs, same sound, but ships on cheaper, more available hardware and addresses a handful of issues in the original.
 
 For wiring/build instructions, see [WIRING.md](WIRING.md).
 
@@ -16,9 +16,9 @@ For wiring/build instructions, see [WIRING.md](WIRING.md).
 
 - **Perceptual velocity curve (CC 82, default ON).** Maps incoming MIDI velocity through a sqrt curve so quiet notes are actually audible without crushing dynamics. Set CC 82 = 0 to fall back to the original linear v1.02 mapping.
 - **Expanded DAC sample bank: 71 samples vs. 7 in v1.02.** The 7 original v1.02 samples are preserved at indices 0–6 ([src/samples_pico.h](src/samples_pico.h)) plus 64 new ones layered on top:
-  - 24 Bitkits drum samples ([src/samples_drums.h](src/samples_drums.h)) — indices 7–30
-  - 24 Bitkits one-shots ([src/samples_oneshots.h](src/samples_oneshots.h)) — indices 31–54
-  - 16 ST-Sound DigiDrum samples ([src/samples_legacy.h](src/samples_legacy.h)) — indices 55–70
+  - 24 Bitkits drum samples ([src/samples_drums.h](src/samples_drums.h))  indices 7–30
+  - 24 Bitkits one-shots ([src/samples_oneshots.h](src/samples_oneshots.h))  indices 31–54
+  - 16 ST-Sound DigiDrum samples ([src/samples_legacy.h](src/samples_legacy.h))  indices 55–70
 
   All triggered the same way as the original GenMDM samples on channel 6 (Note On ≥ MIDI 60 selects sample `pitch % 71`).
 
