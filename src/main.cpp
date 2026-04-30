@@ -212,6 +212,11 @@ void writeMD(byte page, byte address, byte data);
 void writeSN76489(byte data);
 void writeAmplitude(byte velocity, byte channel);
 void writeFrequency(byte pitch, byte channel);
+void flushAllRegisters();
+
+// Hot-plug recovery: set true from CC 120/123 panic; loop() consumes and
+// runs flushAllRegisters() once outside any handler context.
+volatile bool flushPending = false;
 
 // ==================== YM2612 Write Protocol ====================
 // Last-written value cache: skip duplicate register writes (~180us each).
@@ -223,12 +228,14 @@ void writeFrequency(byte pitch, byte channel);
 //                    skipping a "redundant" 0xA4 lets another channel's stale
 //                    latch corrupt the next 0xA0 commit, producing wrong-octave
 //                    notes when multiple channels are interleaving freq writes.
+//   0xFF           - cart-side soft-reset opcode (always emit, never cache).
 uint8_t writeMDCache[2][256];
 bool writeMDCacheValid[2][256];
 
 void writeMD(byte page, byte address, byte data) {
   bool exempt = (address == 0x28) || (address == 0x2A) || (address == 0x2B)
-             || (address >= 0xA0 && address <= 0xAF);
+             || (address >= 0xA0 && address <= 0xAF)
+             || (address == 0xFF);
   if (!exempt && writeMDCacheValid[page][address] && writeMDCache[page][address] == data) return;
   writeMDCache[page][address] = data;
   writeMDCacheValid[page][address] = true;
@@ -268,6 +275,55 @@ void writeFrequency(byte pitch, byte channel) {
   byte ch_shifted = channel << 5;
   writeSN76489(0b10000000 + ch_shifted + pdat1);
   writeSN76489(pdatInt >> 4);
+}
+
+// ==================== State Flush (hot-plug recovery) ====================
+// Replays every shadow register to the cart. Triggers:
+//   - End of setup() so post-init shadows always reach the cart even if
+//     some early writes raced cart cold-boot.
+//   - CC 120 / CC 123 (DAW panic) - user gesture for Genesis power-cycle recovery.
+// First emits the cart-side soft-reset opcode (writeMD addr 0xFF) so the
+// cart's nibble accumulators start clean. Skips key-on (0x28) and the DAC
+// stream (0x2A/0x2B) - those are events, not state.
+// ~13ms total (~65 regs * ~200us). Run from loop(), not interrupt context.
+void flushAllRegisters() {
+  // Invalidate cache so re-emits aren't short-circuited as redundant.
+  memset(writeMDCacheValid, 0, sizeof(writeMDCacheValid));
+
+  // Cart-side accumulator reset.
+  writeMD(0, 0xFF, 0x00);
+
+  // Global LFO.
+  writeMD(0, 0x22, reg22);
+
+  // Per-FM-channel timbre state.
+  byte v = applyCurve(velocity);
+  for (byte ch = 0; ch < 6; ch++) {
+    byte page = ch / 3;
+    byte chr  = ch % 3;
+    writeMD(page, 0x30 + chr, reg30[ch]);
+    writeMD(page, 0x34 + chr, reg34[ch]);
+    writeMD(page, 0x38 + chr, reg38[ch]);
+    writeMD(page, 0x3C + chr, reg3c[ch]);
+    writeMD(page, 0x40 + chr, 127 - ((v * TL1[ch] + 63) / 127));
+    writeMD(page, 0x44 + chr, 127 - ((v * TL2[ch] + 63) / 127));
+    writeMD(page, 0x48 + chr, 127 - ((v * TL3[ch] + 63) / 127));
+    writeMD(page, 0x4C + chr, 127 - ((v * TL4[ch] + 63) / 127));
+    writeMD(page, 0x50 + chr, reg50[ch]);
+    writeMD(page, 0x54 + chr, reg54[ch]);
+    writeMD(page, 0x58 + chr, reg58[ch]);
+    writeMD(page, 0x5C + chr, reg5c[ch]);
+    writeMD(page, 0x60 + chr, reg60[ch]);
+    writeMD(page, 0x64 + chr, reg64[ch]);
+    writeMD(page, 0x68 + chr, reg68[ch]);
+    writeMD(page, 0x6C + chr, reg6c[ch]);
+    writeMD(page, 0x80 + chr, reg80[ch]);
+    writeMD(page, 0x84 + chr, reg84[ch]);
+    writeMD(page, 0x88 + chr, reg88[ch]);
+    writeMD(page, 0x8C + chr, reg8c[ch]);
+    writeMD(page, 0xB0 + chr, regB0[ch]);
+    writeMD(page, 0xB4 + chr, regB4[ch]);
+  }
 }
 
 // ==================== Note On ====================
@@ -459,6 +515,9 @@ void doCC(byte channel, byte ccnumber, byte ccvalue) {
       }
       for (int i = 0; i < 4; i++) { writeAmplitude(0, i); velocityData[i] = 0; }
       SPB_flag = 0;
+      // Hot-plug recovery: rebuild full cart state from shadows on next loop().
+      // Lets the user recover from a Genesis power-cycle with the DAW panic button.
+      flushPending = true;
       break;
 
     case 9: {
@@ -610,7 +669,7 @@ void setup() {
   serialMIDI.setHandlePitchBend(handlePitchBend);
   serialMIDI.setHandleProgramChange(handleProgramChange);
 
-  delay(550); // Wait for cart ROM YM2612 init
+  delay(250); // Wait for cart ROM YM2612 init (cart cold-start <150ms)
 
   // Match original v1.02 firmware setup (verified against hex disassembly)
   doCC(1,77,127); delay(1); doCC(2,77,127); delay(1);
@@ -630,6 +689,12 @@ void setup() {
   doNote(5,76,115); delay(120); doNote(5,76,0); delay(30);
   doNote(6,79,110); delay(300); doNote(6,79,0);
 
+  // Safety net: replay all shadow regs to the cart. If any of the init
+  // writes above raced cart cold-boot (e.g. user picked a slow Genesis or
+  // the 250ms guess was too tight), this ensures the cart matches Pico
+  // shadow state before the user's first MIDI note arrives.
+  flushAllRegisters();
+
   randomSeed(rp2040.hwrand32());
 }
 
@@ -642,6 +707,10 @@ void loop() {
   for (byte i = 0; i < 6; i++) {
     if (bendPending[i]) { bendPending[i] = false; doBend(i + 1, bendPendingValue[i]); }
   }
+
+  // Hot-plug recovery: if a panic CC fired, replay full cart state now
+  // (outside the MIDI handler so it doesn't stall the read path).
+  if (flushPending) { flushPending = false; flushAllRegisters(); }
 
   // Turn off LED after flash duration
   if (ledFlashUntil != 0 && millis() > ledFlashUntil) {
