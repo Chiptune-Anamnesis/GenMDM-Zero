@@ -610,17 +610,19 @@ void doProgramChange(byte channel, byte program) {
   doCC(channel, 9, program);
 }
 
-// Non-blocking LED flash - flash purple for note on, turn off when elapsed
+// LED flash state - updated in MIDI handler, actual NeoPixel show() done in
+// loop() to avoid bit-bang timing collisions with USB interrupt processing.
+volatile bool ledFlashRequest = false;
 volatile unsigned long ledFlashUntil = 0;
-inline void flashLED() {
-  pixel.setPixelColor(0, pixel.Color(30, 0, 40)); // purple (dim)
-  pixel.show();
-  ledFlashUntil = millis() + 50; // 50ms flash
-}
+bool ledCurrentlyOn = false;
 
 void handleNoteOn(byte ch, byte note, byte vel) {
-  if (vel == 0) { doNoteOff(ch, note, 0); }
-  else { flashLED(); doNote(ch, note, vel); }
+  if (vel == 0) {
+    doNoteOff(ch, note, 0);
+  } else {
+    ledFlashRequest = true;  // tell loop() to light LED
+    doNote(ch, note, vel);
+  }
 }
 void handleNoteOff(byte ch, byte note, byte vel) { doNoteOff(ch, note, vel); }
 void handleCC(byte ch, byte num, byte val) { doCC(ch, num, val); }
@@ -633,6 +635,24 @@ void handleProgramChange(byte ch, byte pgm) { doProgramChange(ch, pgm); }
 
 // ==================== Setup ====================
 void setup() {
+  // USB MIDI - MUST be set up FIRST, before any delays or peripheral init,
+  // so descriptors are ready before the host starts enumeration.
+  TinyUSBDevice.setManufacturerDescriptor("Catskull");
+  TinyUSBDevice.setProductDescriptor("GenMDM Pico");
+  usb_midi.setStringDescriptor("GenMDM Pico MIDI");
+  usb_midi.begin();
+  if (!TinyUSBDevice.isInitialized()) {
+    TinyUSBDevice.begin(0);
+  }
+
+  usbMIDI.begin(MIDI_CHANNEL_OMNI);
+  usbMIDI.turnThruOff();  // CRITICAL: prevents MIDI feedback loop with DAW
+  usbMIDI.setHandleNoteOn(handleNoteOn);
+  usbMIDI.setHandleNoteOff(handleNoteOff);
+  usbMIDI.setHandleControlChange(handleCC);
+  usbMIDI.setHandlePitchBend(handlePitchBend);
+  usbMIDI.setHandleProgramChange(handleProgramChange);
+
   // Debug LED (NeoPixel on GP16)
   pixel.begin();
   pixel.setPixelColor(0, pixel.Color(0, 0, 50));  // dim blue
@@ -650,19 +670,16 @@ void setup() {
 
   setWR(false); setNB(false); setAD(false); outputNibble(0x00);
 
-  // USB MIDI
-  usb_midi.setStringDescriptor("GenMDM Pico v1.02");
-  usbMIDI.begin(MIDI_CHANNEL_OMNI);
-  usbMIDI.setHandleNoteOn(handleNoteOn);
-  usbMIDI.setHandleNoteOff(handleNoteOff);
-  usbMIDI.setHandleControlChange(handleCC);
-  usbMIDI.setHandlePitchBend(handlePitchBend);
-  usbMIDI.setHandleProgramChange(handleProgramChange);
-
   // Serial MIDI (TRS input on GP1/Serial1 RX via 6N137)
+  // CRITICAL: enable internal pullup on RX pin. Without it, floating input
+  // picks up noise and Serial1 parses garbage bytes as random MIDI notes,
+  // causing notes to fire randomly. Pullup is harmless when 6N137 IS connected
+  // (open-collector output works fine with pullup, as expected by MIDI spec).
   Serial1.setFIFOSize(256);
   Serial1.setRX(1);
+  pinMode(1, INPUT_PULLUP);
   serialMIDI.begin(MIDI_CHANNEL_OMNI);
+  serialMIDI.turnThruOff();  // CRITICAL: prevents MIDI feedback loop
   serialMIDI.setHandleNoteOn(handleNoteOn);
   serialMIDI.setHandleNoteOff(handleNoteOff);
   serialMIDI.setHandleControlChange(handleCC);
@@ -712,10 +729,24 @@ void loop() {
   // (outside the MIDI handler so it doesn't stall the read path).
   if (flushPending) { flushPending = false; flushAllRegisters(); }
 
-  // Turn off LED after flash duration
-  if (ledFlashUntil != 0 && millis() > ledFlashUntil) {
+  // LED handling - kept out of MIDI handlers to avoid USB interrupt collisions
+  // with WS2812 bit-bang timing.
+  if (ledFlashRequest) {
+    ledFlashRequest = false;
+    if (!ledCurrentlyOn) {
+      noInterrupts();
+      pixel.setPixelColor(0, pixel.Color(30, 0, 40)); // purple
+      pixel.show();
+      interrupts();
+      ledCurrentlyOn = true;
+    }
+    ledFlashUntil = millis() + 60;
+  }
+  if (ledCurrentlyOn && millis() > ledFlashUntil) {
+    noInterrupts();
     pixel.setPixelColor(0, 0);
     pixel.show();
-    ledFlashUntil = 0;
+    interrupts();
+    ledCurrentlyOn = false;
   }
 }
